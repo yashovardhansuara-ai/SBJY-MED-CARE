@@ -1,21 +1,70 @@
 import { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
 import { motion } from 'motion/react';
-import { Send, Bot, User, Loader2, Trash2 } from 'lucide-react';
+import { Send, Bot, User, Loader2, Trash2, Camera, X } from 'lucide-react';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 interface ChatAssistantProps {
   privacyMode?: boolean;
+  latestScan?: any;
 }
 
-const DEFAULT_MESSAGE = { role: 'model' as const, text: 'Terminal active. Secure connection established. How can I assist with your medical data today?' };
+interface ChatMessage {
+  role: 'user' | 'model';
+  text: string;
+  image?: string;
+}
 
-export default function ChatAssistant({ privacyMode = false }: ChatAssistantProps) {
-  const [messages, setMessages] = useState<{role: 'user' | 'model', text: string}[]>([DEFAULT_MESSAGE]);
+const DEFAULT_MESSAGE: ChatMessage = { role: 'model', text: 'Hello! I am your SBJY MED-CARE assistant. I am here to support you in any way I can. How can I help you today? You can ask me questions or upload an image of your medicine for analysis.' };
+
+export default function ChatAssistant({ privacyMode = false, latestScan }: ChatAssistantProps) {
+  const [messages, setMessages] = useState<ChatMessage[]>([DEFAULT_MESSAGE]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [base64Data, setBase64Data] = useState<string | null>(null);
+  const [mimeType, setMimeType] = useState<string | null>(null);
+  const [lastProcessedScan, setLastProcessedScan] = useState<any>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatRef = useRef<any>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const initChat = () => {
+    chatRef.current = ai.chats.create({
+      model: 'gemini-3.1-pro-preview',
+      config: {
+        systemInstruction: 'You are a highly advanced, secure, and deeply supportive medical AI assistant for SBJY MED-CARE. Your primary goal is to act supportive, empathetic, and helpful to the patient. Keep all your answers SHORT, SIMPLE, and EASY TO UNDERSTAND for a layperson, while remaining highly INFORMATIVE. Avoid complex medical jargon where possible, or explain it simply if necessary. Use bullet points for readability when appropriate. You can analyze medicines from text or uploaded images, providing their functions, side effects, and when to consume them. Always use verified medical information. You operate on a Zero-Knowledge Protocol. If the user scans a document, you will be notified via a SYSTEM MESSAGE. Acknowledge the document and ask if they have questions.',
+        tools: [{ googleSearch: {} }]
+      }
+    });
+  };
+
+  useEffect(() => {
+    initChat();
+  }, []);
+
+  useEffect(() => {
+    if (latestScan && latestScan !== lastProcessedScan) {
+      setLastProcessedScan(latestScan);
+      injectContext(latestScan);
+    }
+  }, [latestScan]);
+
+  const injectContext = async (scanData: any) => {
+    setIsLoading(true);
+    try {
+      if (!chatRef.current) initChat();
+      const systemMessage = `[SYSTEM MESSAGE: The user just scanned a new document/prescription in the app. Here are the extracted details: ${JSON.stringify(scanData)}. Acknowledge this to the user in a supportive, empathetic tone. Briefly mention what the document is, and ask if they have any doubts or questions about the prescription, risk level, or medicines.]`;
+      const response = await chatRef.current.sendMessage({ message: systemMessage });
+      setMessages(prev => [...prev, { role: 'model', text: response.text || 'I see you scanned a document. Let me know if you have questions!' }]);
+    } catch (error: any) {
+      console.error("Context Injection Error:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -25,25 +74,53 @@ export default function ChatAssistant({ privacyMode = false }: ChatAssistantProp
     scrollToBottom();
   }, [messages]);
 
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setMimeType(file.type);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const result = e.target?.result as string;
+      setImagePreview(result);
+      const base64 = result.split(',')[1];
+      setBase64Data(base64);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+    if ((!input.trim() && !base64Data) || isLoading) return;
     const userText = input.trim();
+    const currentImagePreview = imagePreview;
+    const currentBase64 = base64Data;
+    const currentMimeType = mimeType;
+
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', text: userText }]);
+    setImagePreview(null);
+    setBase64Data(null);
+    setMimeType(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+
+    setMessages(prev => [...prev, { role: 'user', text: userText, image: currentImagePreview || undefined }]);
     setIsLoading(true);
 
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-preview',
-        contents: userText,
-        config: {
-          systemInstruction: 'You are a highly advanced, secure medical AI assistant for SBJY MED-CARE. Respond concisely, professionally, and with a high-tech, slightly clinical tone. You operate on a Zero-Knowledge Protocol. Do not store or repeat PII unnecessarily.'
-        }
-      });
+      if (!chatRef.current) initChat();
+
+      let messagePayload: any = userText;
+      if (currentBase64 && currentMimeType) {
+        messagePayload = [
+          { inlineData: { data: currentBase64, mimeType: currentMimeType } },
+          userText ? userText : "Please analyze this medicine image, tell me its function, side effects, and when to consume it."
+        ];
+      }
+
+      const response = await chatRef.current.sendMessage({ message: messagePayload });
       setMessages(prev => [...prev, { role: 'model', text: response.text || 'No response generated.' }]);
-    } catch (error) {
-      console.error(error);
-      setMessages(prev => [...prev, { role: 'model', text: 'Error: Connection to AI core failed.' }]);
+    } catch (error: any) {
+      console.error("Chat Error:", error);
+      setMessages(prev => [...prev, { role: 'model', text: `Error: Connection to AI core failed. ${error?.message || 'Please check your API key.'}` }]);
     } finally {
       setIsLoading(false);
     }
@@ -51,18 +128,24 @@ export default function ChatAssistant({ privacyMode = false }: ChatAssistantProp
 
   const handleClear = () => {
     setMessages([DEFAULT_MESSAGE]);
+    setImagePreview(null);
+    setBase64Data(null);
+    setMimeType(null);
+    setLastProcessedScan(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    initChat();
   };
 
   return (
-    <div className="flex flex-col h-full bg-black/40 backdrop-blur-md border border-emerald-500/30 rounded-xl overflow-hidden shadow-[0_0_15px_rgba(16,185,129,0.15)]">
-      <div className="p-4 border-b border-emerald-500/30 bg-emerald-950/20 flex items-center justify-between">
+    <div className="flex flex-col h-full bg-white/60 dark:bg-black/40 backdrop-blur-md border border-emerald-200 dark:border-emerald-500/30 rounded-xl overflow-hidden shadow-[0_0_15px_rgba(16,185,129,0.05)] dark:shadow-[0_0_15px_rgba(16,185,129,0.15)]">
+      <div className="p-4 border-b border-emerald-200 dark:border-emerald-500/30 bg-emerald-100/50 dark:bg-emerald-950/20 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
-          <Bot className="w-5 h-5 text-emerald-400" />
-          <h2 className="text-emerald-400 font-mono font-semibold tracking-wider">AI_CORE_LINK</h2>
+          <Bot className="w-5 h-5 text-emerald-700 dark:text-emerald-400" />
+          <h2 className="text-emerald-700 dark:text-emerald-400 font-mono font-semibold tracking-wider">AI_SUPPORT_CORE</h2>
         </div>
         <button 
           onClick={handleClear}
-          className="text-emerald-700 hover:text-red-400 transition-colors p-1"
+          className="text-emerald-700 dark:text-emerald-500 hover:text-red-400 transition-colors p-1"
           title="Clear Session Data"
         >
           <Trash2 className="w-4 h-4" />
@@ -77,21 +160,26 @@ export default function ChatAssistant({ privacyMode = false }: ChatAssistantProp
             key={idx}
             className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
-            {msg.role === 'model' && <Bot className="w-5 h-5 text-emerald-500 shrink-0 mt-1" />}
-            <div className={`p-3 rounded-lg max-w-[80%] transition-all duration-300 ${privacyMode && idx !== 0 ? 'blur-sm hover:blur-none' : ''} ${
+            {msg.role === 'model' && <Bot className="w-5 h-5 text-emerald-600 dark:text-emerald-500 shrink-0 mt-1" />}
+            <div className={`p-3 rounded-lg max-w-[80%] transition-all duration-300 ${
               msg.role === 'user' 
-                ? 'bg-emerald-600/20 text-emerald-100 border border-emerald-500/30 rounded-tr-none' 
-                : 'bg-black/60 text-emerald-300 border border-emerald-900/50 rounded-tl-none'
+                ? 'bg-emerald-600/20 text-emerald-900 dark:text-emerald-100 border border-emerald-200 dark:border-emerald-500/30 rounded-tr-none' 
+                : 'bg-white/80 dark:bg-black/60 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/50 rounded-tl-none'
             }`}>
+              {msg.image && (
+                <div className="mb-2 rounded-md overflow-hidden border border-emerald-200 dark:border-emerald-500/30">
+                  <img src={msg.image} alt="Uploaded" className="max-w-full h-auto max-h-48 object-contain" />
+                </div>
+              )}
               {msg.text}
             </div>
-            {msg.role === 'user' && <User className="w-5 h-5 text-emerald-400 shrink-0 mt-1" />}
+            {msg.role === 'user' && <User className="w-5 h-5 text-emerald-700 dark:text-emerald-400 shrink-0 mt-1" />}
           </motion.div>
         ))}
         {isLoading && (
           <div className="flex gap-3 justify-start">
-            <Bot className="w-5 h-5 text-emerald-500 shrink-0 mt-1" />
-            <div className="p-3 rounded-lg bg-black/60 text-emerald-500 border border-emerald-900/50 rounded-tl-none flex items-center gap-2">
+            <Bot className="w-5 h-5 text-emerald-600 dark:text-emerald-500 shrink-0 mt-1" />
+            <div className="p-3 rounded-lg bg-white/80 dark:bg-black/60 text-emerald-600 dark:text-emerald-500 border border-emerald-200 dark:border-emerald-900/50 rounded-tl-none flex items-center gap-2">
               <Loader2 className="w-4 h-4 animate-spin" /> Processing...
             </div>
           </div>
@@ -99,20 +187,39 @@ export default function ChatAssistant({ privacyMode = false }: ChatAssistantProp
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="p-4 border-t border-emerald-500/30 bg-black/40">
+      <div className="p-4 border-t border-emerald-200 dark:border-emerald-500/30 bg-white/60 dark:bg-black/40 shrink-0 flex flex-col gap-3">
+        {imagePreview && (
+          <div className="relative w-20 h-20 rounded-lg overflow-hidden border border-emerald-500/50 group">
+            <img src={imagePreview} alt="Upload Preview" className="w-full h-full object-cover" />
+            <button 
+              onClick={() => { setImagePreview(null); setBase64Data(null); setMimeType(null); if(fileInputRef.current) fileInputRef.current.value = ''; }} 
+              className="absolute top-1 right-1 bg-white/80 dark:bg-black/60 text-red-400 p-1 rounded hover:bg-red-900/50 transition-colors opacity-0 group-hover:opacity-100"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        )}
         <div className="flex gap-2">
+          <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
+          <button 
+            onClick={() => fileInputRef.current?.click()} 
+            className="bg-emerald-100/50 dark:bg-emerald-900/20 hover:bg-emerald-800/30 text-emerald-700 dark:text-emerald-400 border border-emerald-500/50 rounded-lg px-3 py-2 transition-colors" 
+            title="Upload Image"
+          >
+            <Camera className="w-5 h-5" />
+          </button>
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-            placeholder="Enter query..."
-            className="flex-1 bg-black/50 border border-emerald-500/50 rounded-lg px-4 py-2 text-emerald-100 font-mono focus:outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400 placeholder-emerald-700/50"
+            placeholder="Ask a question or upload a medicine image..."
+            className="flex-1 bg-white/70 dark:bg-black/50 border border-emerald-500/50 rounded-lg px-4 py-2 text-emerald-900 dark:text-emerald-100 font-mono focus:outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400 placeholder-emerald-700/50"
           />
           <button
             onClick={handleSend}
-            disabled={isLoading || !input.trim()}
-            className="bg-emerald-600/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/50 rounded-lg px-4 py-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={isLoading || (!input.trim() && !base64Data)}
+            className="bg-emerald-600/20 hover:bg-emerald-500/30 text-emerald-700 dark:text-emerald-400 border border-emerald-500/50 rounded-lg px-4 py-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Send className="w-5 h-5" />
           </button>
