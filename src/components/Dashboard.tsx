@@ -1,14 +1,13 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Activity, Shield, Database, LogOut } from 'lucide-react';
+import { Activity, Shield, Database, Eye, EyeOff } from 'lucide-react';
 import Background3D from './Background3D';
 import ChatAssistant from './ChatAssistant';
 import DocumentScanner from './DocumentScanner';
-import { auth } from '../firebase';
-import { signOut } from 'firebase/auth';
 
 export default function Dashboard() {
   const [time, setTime] = useState(new Date().toLocaleTimeString());
+  const [privacyMode, setPrivacyMode] = useState(true);
 
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date().toLocaleTimeString()), 1000);
@@ -37,18 +36,23 @@ export default function Dashboard() {
             </div>
           </div>
           
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-4 md:gap-6">
+            <button
+              onClick={() => setPrivacyMode(!privacyMode)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all font-mono text-xs ${
+                privacyMode 
+                  ? 'bg-emerald-900/40 border-emerald-500/50 text-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.2)]' 
+                  : 'bg-black/40 border-emerald-900/50 text-emerald-700 hover:text-emerald-500'
+              }`}
+              title="Toggle Privacy Blur"
+            >
+              {privacyMode ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              <span className="hidden sm:inline">{privacyMode ? 'PRIVACY: ON' : 'PRIVACY: OFF'}</span>
+            </button>
             <div className="hidden md:block text-right font-mono">
               <div className="text-emerald-400 text-sm">{time}</div>
               <div className="text-emerald-700 text-xs">SYS_STATUS: ONLINE</div>
             </div>
-            <button 
-              onClick={() => signOut(auth)}
-              className="p-2 hover:bg-emerald-900/30 rounded-lg text-emerald-500 hover:text-emerald-400 transition-colors border border-transparent hover:border-emerald-500/30"
-              title="Secure Logout"
-            >
-              <LogOut className="w-5 h-5" />
-            </button>
           </div>
         </header>
 
@@ -61,7 +65,7 @@ export default function Dashboard() {
             transition={{ delay: 0.1 }}
             className="h-full min-h-0"
           >
-            <DocumentScanner />
+            <DocumentScanner privacyMode={privacyMode} />
           </motion.div>
 
           {/* Right Column: AI Chat */}
@@ -71,14 +75,14 @@ export default function Dashboard() {
             transition={{ delay: 0.2 }}
             className="h-full min-h-0"
           >
-            <ChatAssistant />
+            <ChatAssistant privacyMode={privacyMode} />
           </motion.div>
         </div>
         
         {/* Footer Status Bar */}
         <footer className="mt-6 flex items-center justify-between text-xs font-mono text-emerald-700 bg-black/40 backdrop-blur-md border border-emerald-900/50 rounded-lg p-2 px-4 shrink-0">
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1"><Database className="w-3 h-3" /> FIREBASE_LINKED</span>
+            <span className="flex items-center gap-1"><Database className="w-3 h-3" /> LOCAL_NODE_ACTIVE</span>
             <span className="hidden sm:inline">|</span>
             <span className="hidden sm:inline">ENCRYPTION: AES-256</span>
           </div>
