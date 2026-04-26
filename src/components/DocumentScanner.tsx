@@ -2,9 +2,10 @@ import { useState, useRef, useEffect } from 'react';
 import Tesseract from 'tesseract.js';
 import { motion } from 'motion/react';
 import { Scan, Upload, CheckCircle, Loader2, Calendar, ShieldAlert, Activity, Trash2, Cpu, History, ChevronLeft, FileText, Pill, AlertTriangle, Globe } from 'lucide-react';
-import { GoogleGenAI, Type } from '@google/genai';
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+import { Type } from '@google/genai';
+import { useSettings } from '../contexts/SettingsContext';
+import { useSecureChat } from '../contexts/SecureChatContext';
+import { EncryptionUtility } from '../lib/EncryptionUtility';
 
 interface AnalysisData {
   documentType: string;
@@ -34,9 +35,12 @@ interface PrescriptionRecord {
 interface DocumentScannerProps {
   privacyMode?: boolean;
   onScanComplete?: (data: any) => void;
+  glassStyle?: any;
 }
 
-export default function DocumentScanner({ privacyMode = false, onScanComplete }: DocumentScannerProps) {
+export default function DocumentScanner({ privacyMode = false, onScanComplete, glassStyle }: DocumentScannerProps) {
+  const { ghostMode } = useSettings();
+  const { generateContent, pin } = useSecureChat();
   const [isScanning, setIsScanning] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState('');
@@ -49,15 +53,42 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const saved = localStorage.getItem('medcare_history');
-    if (saved) {
+    const loadEncryptedHistory = async () => {
       try {
-        setHistory(JSON.parse(saved));
+        const saved = localStorage.getItem('medcare_history_secure');
+        if (saved && pin) {
+          const decrypted = await EncryptionUtility.decrypt(pin, saved);
+          setHistory(JSON.parse(decrypted));
+        }
       } catch (e) {
-        console.error("Failed to parse history", e);
+        console.error("Failed to decrypt scan history.", e);
       }
+    };
+    loadEncryptedHistory();
+
+    const handleWipe = () => {
+      setHistory([]);
+      handleClear();
+    };
+    window.addEventListener('terminalDataCleared', handleWipe);
+    return () => window.removeEventListener('terminalDataCleared', handleWipe);
+  }, [pin]);
+
+  const saveHistory = async (updatedHistory: PrescriptionRecord[]) => {
+    setHistory(updatedHistory);
+    if (!ghostMode && pin) {
+      const encrypted = await EncryptionUtility.encrypt(pin, JSON.stringify(updatedHistory));
+      localStorage.setItem('medcare_history_secure', encrypted);
     }
-  }, []);
+  };
+
+  const redactPII = (text: string) => {
+    let sanitized = text;
+    // Regex for basic formatting of names, SSN, Phone numbers
+    sanitized = sanitized.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[REDACTED_SSN]");
+    sanitized = sanitized.replace(/\b(?:\+?1[-. ]?)?\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})\b/g, "[REDACTED_PHONE]");
+    return sanitized;
+  };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -77,12 +108,17 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
 
       let extractedText = '';
       try {
-        const worker = await Tesseract.createWorker('eng');
-        worker.setParameters({
+        const worker = await Tesseract.createWorker('eng', 1, {
+          workerPath: 'https://unpkg.com/tesseract.js@v5.0.0/dist/worker.min.js',
+          langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+          corePath: 'https://unpkg.com/tesseract.js-core@v5.0.0/tesseract-core.wasm.js',
+        });
+        
+        await worker.setParameters({
           tessedit_pageseg_mode: Tesseract.PSM.AUTO,
         });
         const ret = await worker.recognize(file);
-        extractedText = ret.data.text;
+        extractedText = redactPII(ret.data.text);
         setResult(extractedText);
         await worker.terminate();
       } catch (err) {
@@ -93,9 +129,9 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
       setIsAnalyzing(true);
 
       try {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.1-pro-preview',
-          contents: {
+        const response = await generateContent(
+          'gemini-3.1-pro-preview',
+          {
             parts: [
               { text: `Analyze this medical document/prescription/medicine image. 
               If it's a prescription or medical report: Generate a detailed description about the patient's health, the risk level, and further procedures/protocols.
@@ -106,7 +142,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
               { inlineData: { data: base64Data, mimeType } }
             ]
           },
-          config: {
+          {
             responseMimeType: 'application/json',
             tools: [{ googleSearch: {} }],
             responseSchema: {
@@ -127,8 +163,10 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
               required: ["documentType", "detailedDescription", "patientHealthAssessment", "riskLevel", "furtherProcedures", "medicineIdentified", "medicineFunctions", "medicineSideEffects", "whenToConsume", "trustedSources", "summary"]
             }
           }
-        });
+        );
         
+        if (response.error) throw new Error(response.error);
+
         if (response.text) {
           const data = JSON.parse(response.text);
           setAnalysisData(data);
@@ -145,8 +183,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
             analysisData: data
           };
           const updatedHistory = [newRecord, ...history];
-          setHistory(updatedHistory);
-          localStorage.setItem('medcare_history', JSON.stringify(updatedHistory));
+          saveHistory(updatedHistory);
         }
       } catch (aiError: any) {
         console.error("AI Analysis failed:", aiError);
@@ -191,8 +228,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
   const deleteHistoryItem = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     const updated = history.filter(h => h.id !== id);
-    setHistory(updated);
-    localStorage.setItem('medcare_history', JSON.stringify(updated));
+    saveHistory(updated);
   };
 
   const getRiskColor = (risk?: string) => {
@@ -205,9 +241,23 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
     }
   };
 
+  const PrivacyWrapper = ({ children }: { children: React.ReactNode }) => {
+    if (!privacyMode) return <>{children}</>;
+    return (
+      <span className="group/privacy cursor-help relative inline-block">
+        <span className="bg-black/80 text-emerald-500 dark:bg-emerald-950 dark:text-emerald-400 font-mono text-sm px-1 rounded blur-sm group-hover/privacy:blur-none transition-all duration-300">
+          [REDACTED]
+        </span>
+        <span className="opacity-0 group-hover/privacy:opacity-100 absolute left-0 top-0 bottom-0 right-0 flex items-center bg-black/90 text-white rounded px-1 transition-opacity z-10 pointer-events-none">
+          {children}
+        </span>
+      </span>
+    );
+  };
+
   if (showHistory) {
     return (
-      <div className="flex flex-col h-full bg-white/60 dark:bg-black/40 backdrop-blur-md border border-emerald-200 dark:border-emerald-500/30 rounded-xl overflow-hidden shadow-[0_0_15px_rgba(16,185,129,0.05)] dark:shadow-[0_0_15px_rgba(16,185,129,0.15)]">
+      <div style={glassStyle} className="flex flex-col h-full bg-white/60 dark:bg-black/40 border border-emerald-200 dark:border-emerald-500/30 rounded-xl overflow-hidden shadow-[0_0_15px_rgba(16,185,129,0.05)] dark:shadow-[0_0_15px_rgba(16,185,129,0.15)]">
         <div className="p-4 border-b border-emerald-200 dark:border-emerald-500/30 bg-emerald-100/50 dark:bg-emerald-950/20 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <button onClick={() => setShowHistory(false)} className="text-emerald-700 dark:text-emerald-400 hover:text-emerald-800 dark:text-emerald-300 transition-colors p-1">
@@ -255,7 +305,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
   }
 
   return (
-    <div className="flex flex-col h-full bg-white/60 dark:bg-black/40 backdrop-blur-md border border-emerald-200 dark:border-emerald-500/30 rounded-xl overflow-hidden shadow-[0_0_15px_rgba(16,185,129,0.05)] dark:shadow-[0_0_15px_rgba(16,185,129,0.15)]">
+    <div style={glassStyle} className="flex flex-col h-full bg-white/60 dark:bg-black/40 border border-emerald-200 dark:border-emerald-500/30 rounded-xl overflow-hidden shadow-[0_0_15px_rgba(16,185,129,0.05)] dark:shadow-[0_0_15px_rgba(16,185,129,0.15)]">
       <div className="p-4 border-b border-emerald-200 dark:border-emerald-500/30 bg-emerald-100/50 dark:bg-emerald-950/20 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
           <Scan className="w-5 h-5 text-emerald-700 dark:text-emerald-400" />
@@ -342,10 +392,10 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
               {/* Document Classification */}
               <div className="bg-white/80 dark:bg-black/60 border border-emerald-200 dark:border-emerald-500/30 p-4 rounded-lg">
                 <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 font-mono text-sm mb-2">
-                  <FileText className="w-4 h-4" /> Document Type: <span className="text-emerald-800 dark:text-emerald-300 font-bold">{analysisData.documentType}</span>
+                  <FileText className="w-4 h-4" /> Document Type: <span className="text-emerald-800 dark:text-emerald-300 font-bold"><PrivacyWrapper>{analysisData.documentType}</PrivacyWrapper></span>
                 </div>
                 <p className="text-emerald-900/80 dark:text-emerald-100/80 font-mono text-sm leading-relaxed">
-                  {analysisData.detailedDescription}
+                  <PrivacyWrapper>{analysisData.detailedDescription}</PrivacyWrapper>
                 </p>
               </div>
 
@@ -356,7 +406,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
                     <Activity className="w-4 h-4" /> Patient Health Assessment
                   </div>
                   <p className="text-emerald-900/80 dark:text-emerald-100/80 font-mono text-sm leading-relaxed">
-                    {analysisData.patientHealthAssessment}
+                    <PrivacyWrapper>{analysisData.patientHealthAssessment}</PrivacyWrapper>
                   </p>
                 </div>
               )}
@@ -366,10 +416,10 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
                 <div className="bg-white/80 dark:bg-black/60 border border-emerald-200 dark:border-emerald-500/30 p-4 rounded-lg flex flex-col gap-4">
                   <div>
                     <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 font-mono text-sm mb-2">
-                      <Pill className="w-4 h-4" /> Medicine Identified: <span className="text-emerald-800 dark:text-emerald-300 font-bold">{analysisData.medicineIdentified}</span>
+                      <Pill className="w-4 h-4" /> Medicine Identified: <span className="text-emerald-800 dark:text-emerald-300 font-bold"><PrivacyWrapper>{analysisData.medicineIdentified}</PrivacyWrapper></span>
                     </div>
                     <div className="text-emerald-900/80 dark:text-emerald-100/80 font-mono text-sm leading-relaxed mb-3">
-                      <span className="text-emerald-600 dark:text-emerald-500 font-semibold">When to consume:</span> {analysisData.whenToConsume}
+                      <span className="text-emerald-600 dark:text-emerald-500 font-semibold">When to consume:</span> <PrivacyWrapper>{analysisData.whenToConsume}</PrivacyWrapper>
                     </div>
 
                     {analysisData.medicineFunctions && analysisData.medicineFunctions.length > 0 && (
@@ -378,7 +428,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
                         <ul className="space-y-1">
                           {analysisData.medicineFunctions.map((func, idx) => (
                             <li key={idx} className="flex items-start gap-2 text-emerald-900/80 dark:text-emerald-100/80 text-sm font-mono">
-                              <span className="text-emerald-600 dark:text-emerald-500 mt-0.5">▸</span> <span>{func}</span>
+                              <span className="text-emerald-600 dark:text-emerald-500 mt-0.5">▸</span> <span><PrivacyWrapper>{func}</PrivacyWrapper></span>
                             </li>
                           ))}
                         </ul>
@@ -394,7 +444,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
                       <div className="flex flex-wrap gap-2">
                         {analysisData.medicineSideEffects.map((effect, idx) => (
                           <span key={idx} className="bg-orange-900/30 border border-orange-500/30 text-orange-200 text-xs font-mono px-2 py-1 rounded">
-                            {effect}
+                            <PrivacyWrapper>{effect}</PrivacyWrapper>
                           </span>
                         ))}
                       </div>
@@ -410,7 +460,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
                     <Activity className="w-4 h-4" /> Risk Assessment
                   </div>
                   <div className={`px-3 py-1 rounded-md border font-mono text-xs font-bold tracking-wider uppercase ${getRiskColor(analysisData.riskLevel)}`}>
-                    {analysisData.riskLevel} RISK
+                    <PrivacyWrapper>{analysisData.riskLevel} RISK</PrivacyWrapper>
                   </div>
                 </div>
 
@@ -424,7 +474,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
                       {analysisData.furtherProcedures.map((protocol, idx) => (
                         <li key={idx} className="flex items-start gap-2 text-emerald-900 dark:text-emerald-100 text-sm font-mono">
                           <span className="text-emerald-600 dark:text-emerald-500 mt-0.5">▸</span>
-                          <span>{protocol}</span>
+                          <span><PrivacyWrapper>{protocol}</PrivacyWrapper></span>
                         </li>
                       ))}
                     </ul>
@@ -441,7 +491,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
                   <ul className="space-y-1">
                     {analysisData.trustedSources.map((source, idx) => (
                       <li key={idx} className="flex items-start gap-2 text-emerald-800 dark:text-emerald-200 text-xs font-mono break-all">
-                        <span className="text-emerald-600 dark:text-emerald-500 mt-0.5">▸</span> <span>{source}</span>
+                        <span className="text-emerald-600 dark:text-emerald-500 mt-0.5">▸</span> <span><PrivacyWrapper>{source}</PrivacyWrapper></span>
                       </li>
                     ))}
                   </ul>
@@ -460,7 +510,7 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete }:
                 <CheckCircle className="w-3 h-3" /> Raw Extracted Text
               </div>
               <div className="flex-1 bg-white/60 dark:bg-black/40 border border-emerald-200 dark:border-emerald-900/50 rounded-lg p-3 font-mono text-xs text-emerald-700 dark:text-emerald-500 overflow-y-auto whitespace-pre-wrap shadow-inner">
-                {result}
+                <PrivacyWrapper>{result}</PrivacyWrapper>
               </div>
             </motion.div>
           )}

@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI } from '@google/genai';
 import { motion } from 'motion/react';
 import { Send, Bot, User, Loader2, Trash2, Camera, X } from 'lucide-react';
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+import { useSettings } from '../contexts/SettingsContext';
+import { useSecureChat } from '../contexts/SecureChatContext';
+import { EncryptionUtility } from '../lib/EncryptionUtility';
 
 interface ChatAssistantProps {
   privacyMode?: boolean;
   latestScan?: any;
+  glassStyle?: any;
 }
 
 interface ChatMessage {
@@ -18,7 +19,9 @@ interface ChatMessage {
 
 const DEFAULT_MESSAGE: ChatMessage = { role: 'model', text: 'Hello! I am your SBJY MED-CARE assistant. I am here to support you in any way I can. How can I help you today? You can ask me questions or upload an image of your medicine for analysis.' };
 
-export default function ChatAssistant({ privacyMode = false, latestScan }: ChatAssistantProps) {
+export default function ChatAssistant({ privacyMode = false, latestScan, glassStyle }: ChatAssistantProps) {
+  const { ghostMode, proactiveAI, comprehensionLevel } = useSettings();
+  const { sendMessage, pin } = useSecureChat();
   const [messages, setMessages] = useState<ChatMessage[]>([DEFAULT_MESSAGE]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -28,36 +31,87 @@ export default function ChatAssistant({ privacyMode = false, latestScan }: ChatA
   const [lastProcessedScan, setLastProcessedScan] = useState<any>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const chatRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const initChat = () => {
-    chatRef.current = ai.chats.create({
-      model: 'gemini-3.1-pro-preview',
-      config: {
-        systemInstruction: 'You are a highly advanced, secure, and deeply supportive medical AI assistant for SBJY MED-CARE. Your primary goal is to act supportive, empathetic, and helpful to the patient. Keep all your answers SHORT, SIMPLE, and EASY TO UNDERSTAND for a layperson, while remaining highly INFORMATIVE. Avoid complex medical jargon where possible, or explain it simply if necessary. Use bullet points for readability when appropriate. You can analyze medicines from text or uploaded images, providing their functions, side effects, and when to consume them. Always use verified medical information. You operate on a Zero-Knowledge Protocol. If the user scans a document, you will be notified via a SYSTEM MESSAGE. Acknowledge the document and ask if they have questions.',
-        tools: [{ googleSearch: {} }]
-      }
-    });
-  };
-
+  // Load encrypted history
   useEffect(() => {
-    initChat();
+    const loadEncryptedHistory = async () => {
+      try {
+        const saved = localStorage.getItem('chatHistory_secure');
+        if (saved && pin) {
+          const decrypted = await EncryptionUtility.decrypt(pin, saved);
+          setMessages(JSON.parse(decrypted));
+        }
+      } catch (e) {
+        console.error("Failed to decrypt chat history. Data might be corrupted or PIN is wrong.");
+      }
+    };
+    loadEncryptedHistory();
+  }, [pin]);
+
+  // Save to localStorage securely whenever messages change (if not in Ghost Mode)
+  useEffect(() => {
+    const saveSecurely = async () => {
+      if (!ghostMode && pin && messages.length > 1) {
+        const encrypted = await EncryptionUtility.encrypt(pin, JSON.stringify(messages));
+        localStorage.setItem('chatHistory_secure', encrypted);
+      }
+    };
+    saveSecurely();
+  }, [messages, ghostMode, pin]);
+
+  // Handle wiping data from settings
+  useEffect(() => {
+    const handleWipe = () => {
+      setMessages([DEFAULT_MESSAGE]);
+      setLastProcessedScan(null);
+    };
+    window.addEventListener('terminalDataCleared', handleWipe);
+    return () => window.removeEventListener('terminalDataCleared', handleWipe);
   }, []);
+
+  const getConfig = () => {
+    const complexityInstruction = comprehensionLevel === 'layperson' 
+      ? 'Keep all your answers SHORT, SIMPLE, and EASY TO UNDERSTAND for a layperson. Use analogies.' 
+      : 'Provide detailed Clinical terminology and raw medical data.';
+    
+    return {
+      systemInstruction: `You are a highly advanced, secure, and deeply supportive medical AI assistant for SBJY MED-CARE. Your primary goal is to act supportive, empathetic, and helpful to the patient. ${complexityInstruction} Always use verified medical information. You operate on a Zero-Knowledge Protocol. If the user scans a document, you will be notified via a SYSTEM MESSAGE. Acknowledge the document and ask if they have questions.`,
+      tools: [{ googleSearch: {} }]
+    };
+  };
 
   useEffect(() => {
     if (latestScan && latestScan !== lastProcessedScan) {
       setLastProcessedScan(latestScan);
-      injectContext(latestScan);
+      if (proactiveAI) {
+        injectContext(latestScan);
+      }
     }
-  }, [latestScan]);
+  }, [latestScan, proactiveAI]);
+
+  const removePII = (text: string) => {
+    let sanitized = text;
+    // Regex for basic formatting of names, SSN, Phone numbers
+    sanitized = sanitized.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[REDACTED_SSN]");
+    sanitized = sanitized.replace(/\b(?:\+?1[-. ]?)?\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})\b/g, "[REDACTED_PHONE]");
+    return sanitized;
+  };
 
   const injectContext = async (scanData: any) => {
     setIsLoading(true);
     try {
-      if (!chatRef.current) initChat();
-      const systemMessage = `[SYSTEM MESSAGE: The user just scanned a new document/prescription in the app. Here are the extracted details: ${JSON.stringify(scanData)}. Acknowledge this to the user in a supportive, empathetic tone. Briefly mention what the document is, and ask if they have any doubts or questions about the prescription, risk level, or medicines.]`;
-      const response = await chatRef.current.sendMessage({ message: systemMessage });
+      const sanitizedData = removePII(JSON.stringify(scanData));
+      const systemMessage = `[SYSTEM MESSAGE: The user just scanned a new document/prescription in the app. Here are the extracted details: ${sanitizedData}. Acknowledge this to the user in a supportive, empathetic tone. Briefly mention what the document is, and ask if they have any doubts or questions about the prescription, risk level, or medicines.]`;
+      
+      const payloadMessages = messages.map(m => ({
+        role: m.role,
+        text: m.text
+        // ignoring images for context injection history for simplicity
+      }));
+      payloadMessages.push({ role: 'user', text: systemMessage });
+
+      const response = await sendMessage('gemini-3.1-pro-preview', getConfig(), payloadMessages);
       setMessages(prev => [...prev, { role: 'model', text: response.text || 'I see you scanned a document. Let me know if you have questions!' }]);
     } catch (error: any) {
       console.error("Context Injection Error:", error);
@@ -102,25 +156,35 @@ export default function ChatAssistant({ privacyMode = false, latestScan }: ChatA
     setMimeType(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
 
-    setMessages(prev => [...prev, { role: 'user', text: userText, image: currentImagePreview || undefined }]);
+    const sanitizedUserText = removePII(userText);
+    setMessages(prev => [...prev, { role: 'user', text: sanitizedUserText, image: currentImagePreview || undefined }]);
     setIsLoading(true);
 
     try {
-      if (!chatRef.current) initChat();
-
-      let messagePayload: any = userText;
+      const payloadMessages = messages.map(m => {
+          if (m.image && !m.text) return { role: m.role, text: "[Image Provided]" };
+          return { role: m.role, text: m.text }
+      });
+      
       if (currentBase64 && currentMimeType) {
-        messagePayload = [
-          { inlineData: { data: currentBase64, mimeType: currentMimeType } },
-          userText ? userText : "Please analyze this medicine image, tell me its function, side effects, and when to consume it."
-        ];
+        payloadMessages.push({ 
+          role: 'user', 
+          parts: [
+            { inlineData: { data: currentBase64, mimeType: currentMimeType } },
+            { text: sanitizedUserText ? sanitizedUserText : "Please analyze this medicine image, tell me its function, side effects, and when to consume it." }
+          ]
+        } as any);
+      } else {
+        payloadMessages.push({ role: 'user', text: sanitizedUserText });
       }
 
-      const response = await chatRef.current.sendMessage({ message: messagePayload });
+      const response = await sendMessage('gemini-3.1-pro-preview', getConfig(), payloadMessages);
+      if (response.error) throw new Error(response.error);
+      
       setMessages(prev => [...prev, { role: 'model', text: response.text || 'No response generated.' }]);
     } catch (error: any) {
       console.error("Chat Error:", error);
-      setMessages(prev => [...prev, { role: 'model', text: `Error: Connection to AI core failed. ${error?.message || 'Please check your API key.'}` }]);
+      setMessages(prev => [...prev, { role: 'model', text: `Error: Connection to AI core failed. ${error?.message || 'Please check your connection.'}` }]);
     } finally {
       setIsLoading(false);
     }
@@ -133,15 +197,18 @@ export default function ChatAssistant({ privacyMode = false, latestScan }: ChatA
     setMimeType(null);
     setLastProcessedScan(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
-    initChat();
+    if (!ghostMode) {
+      localStorage.removeItem('chatHistory_secure');
+    }
   };
 
   return (
-    <div className="flex flex-col h-full bg-white/60 dark:bg-black/40 backdrop-blur-md border border-emerald-200 dark:border-emerald-500/30 rounded-xl overflow-hidden shadow-[0_0_15px_rgba(16,185,129,0.05)] dark:shadow-[0_0_15px_rgba(16,185,129,0.15)]">
+    <div style={glassStyle} className="flex flex-col h-full bg-white/60 dark:bg-black/40 border border-emerald-200 dark:border-emerald-500/30 rounded-xl overflow-hidden shadow-[0_0_15px_rgba(16,185,129,0.05)] dark:shadow-[0_0_15px_rgba(16,185,129,0.15)]">
       <div className="p-4 border-b border-emerald-200 dark:border-emerald-500/30 bg-emerald-100/50 dark:bg-emerald-950/20 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
           <Bot className="w-5 h-5 text-emerald-700 dark:text-emerald-400" />
           <h2 className="text-emerald-700 dark:text-emerald-400 font-mono font-semibold tracking-wider">AI_SUPPORT_CORE</h2>
+          {ghostMode && <span className="text-[10px] bg-purple-500 text-white px-1.5 py-0.5 rounded font-bold ml-2">GHOST</span>}
         </div>
         <button 
           onClick={handleClear}
@@ -171,7 +238,16 @@ export default function ChatAssistant({ privacyMode = false, latestScan }: ChatA
                   <img src={msg.image} alt="Uploaded" className="max-w-full h-auto max-h-48 object-contain" />
                 </div>
               )}
-              {msg.text}
+              {privacyMode ? (
+                <span className="group/privacy cursor-help relative block">
+                  <span className="bg-emerald-900/10 text-emerald-600 dark:bg-white/10 dark:text-emerald-400 font-mono text-sm p-1 rounded blur-sm group-hover/privacy:blur-none transition-all duration-300 select-none">
+                    [REDACTED_CHAT_BLOCK]
+                  </span>
+                  <span className="opacity-0 group-hover/privacy:opacity-100 absolute left-0 top-0 bottom-0 right-0 p-1 flex items-start bg-white/90 dark:bg-black/90 rounded transition-opacity z-10 pointer-events-none overflow-hidden">
+                    {msg.text}
+                  </span>
+                </span>
+              ) : msg.text}
             </div>
             {msg.role === 'user' && <User className="w-5 h-5 text-emerald-700 dark:text-emerald-400 shrink-0 mt-1" />}
           </motion.div>
