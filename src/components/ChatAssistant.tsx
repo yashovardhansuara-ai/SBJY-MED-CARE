@@ -3,7 +3,6 @@ import { motion } from 'motion/react';
 import { Send, Bot, User, Loader2, Trash2, Camera, X } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 import { useSecureChat } from '../contexts/SecureChatContext';
-import { EncryptionUtility } from '../lib/EncryptionUtility';
 
 interface ChatAssistantProps {
   privacyMode?: boolean;
@@ -21,8 +20,14 @@ const DEFAULT_MESSAGE: ChatMessage = { role: 'model', text: 'Hello! I am your SB
 
 export default function ChatAssistant({ privacyMode = false, latestScan, glassStyle }: ChatAssistantProps) {
   const { ghostMode, proactiveAI, comprehensionLevel } = useSettings();
-  const { sendMessage, pin } = useSecureChat();
-  const [messages, setMessages] = useState<ChatMessage[]>([DEFAULT_MESSAGE]);
+  const { sendMessage } = useSecureChat();
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    try {
+      const saved = localStorage.getItem('chatHistory');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [DEFAULT_MESSAGE];
+  });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -33,32 +38,12 @@ export default function ChatAssistant({ privacyMode = false, latestScan, glassSt
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load encrypted history
+  // Save to localStorage whenever messages change (if not in Ghost Mode)
   useEffect(() => {
-    const loadEncryptedHistory = async () => {
-      try {
-        const saved = localStorage.getItem('chatHistory_secure');
-        if (saved && pin) {
-          const decrypted = await EncryptionUtility.decrypt(pin, saved);
-          setMessages(JSON.parse(decrypted));
-        }
-      } catch (e) {
-        console.error("Failed to decrypt chat history. Data might be corrupted or PIN is wrong.");
-      }
-    };
-    loadEncryptedHistory();
-  }, [pin]);
-
-  // Save to localStorage securely whenever messages change (if not in Ghost Mode)
-  useEffect(() => {
-    const saveSecurely = async () => {
-      if (!ghostMode && pin && messages.length > 1) {
-        const encrypted = await EncryptionUtility.encrypt(pin, JSON.stringify(messages));
-        localStorage.setItem('chatHistory_secure', encrypted);
-      }
-    };
-    saveSecurely();
-  }, [messages, ghostMode, pin]);
+    if (!ghostMode) {
+      localStorage.setItem('chatHistory', JSON.stringify(messages));
+    }
+  }, [messages, ghostMode]);
 
   // Handle wiping data from settings
   useEffect(() => {
@@ -128,19 +113,51 @@ export default function ChatAssistant({ privacyMode = false, latestScan, glassSt
     scrollToBottom();
   }, [messages]);
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const compressImage = async (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.src = event.target?.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 1000;
+          const MAX_HEIGHT = 1000;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.6));
+        };
+      };
+    });
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setMimeType(file.type);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const result = e.target?.result as string;
-      setImagePreview(result);
-      const base64 = result.split(',')[1];
-      setBase64Data(base64);
-    };
-    reader.readAsDataURL(file);
+    const compressedBase64URL = await compressImage(file);
+    setMimeType('image/jpeg');
+    
+    setImagePreview(compressedBase64URL);
+    const base64 = compressedBase64URL.split(',')[1];
+    setBase64Data(base64);
   };
 
   const handleSend = async () => {
@@ -198,7 +215,7 @@ export default function ChatAssistant({ privacyMode = false, latestScan, glassSt
     setLastProcessedScan(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (!ghostMode) {
-      localStorage.removeItem('chatHistory_secure');
+      localStorage.removeItem('chatHistory');
     }
   };
 

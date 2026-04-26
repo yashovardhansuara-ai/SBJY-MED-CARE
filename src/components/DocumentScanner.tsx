@@ -5,7 +5,6 @@ import { Scan, Upload, CheckCircle, Loader2, Calendar, ShieldAlert, Activity, Tr
 import { Type } from '@google/genai';
 import { useSettings } from '../contexts/SettingsContext';
 import { useSecureChat } from '../contexts/SecureChatContext';
-import { EncryptionUtility } from '../lib/EncryptionUtility';
 
 interface AnalysisData {
   documentType: string;
@@ -40,7 +39,7 @@ interface DocumentScannerProps {
 
 export default function DocumentScanner({ privacyMode = false, onScanComplete, glassStyle }: DocumentScannerProps) {
   const { ghostMode } = useSettings();
-  const { generateContent, pin } = useSecureChat();
+  const { generateContent } = useSecureChat();
   const [isScanning, setIsScanning] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState('');
@@ -53,18 +52,14 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete, g
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const loadEncryptedHistory = async () => {
+    const saved = localStorage.getItem('medcare_history');
+    if (saved) {
       try {
-        const saved = localStorage.getItem('medcare_history_secure');
-        if (saved && pin) {
-          const decrypted = await EncryptionUtility.decrypt(pin, saved);
-          setHistory(JSON.parse(decrypted));
-        }
+        setHistory(JSON.parse(saved));
       } catch (e) {
-        console.error("Failed to decrypt scan history.", e);
+        console.error("Failed to parse history", e);
       }
-    };
-    loadEncryptedHistory();
+    }
 
     const handleWipe = () => {
       setHistory([]);
@@ -72,13 +67,12 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete, g
     };
     window.addEventListener('terminalDataCleared', handleWipe);
     return () => window.removeEventListener('terminalDataCleared', handleWipe);
-  }, [pin]);
+  }, []);
 
-  const saveHistory = async (updatedHistory: PrescriptionRecord[]) => {
+  const saveHistory = (updatedHistory: PrescriptionRecord[]) => {
     setHistory(updatedHistory);
-    if (!ghostMode && pin) {
-      const encrypted = await EncryptionUtility.encrypt(pin, JSON.stringify(updatedHistory));
-      localStorage.setItem('medcare_history_secure', encrypted);
+    if (!ghostMode) {
+      localStorage.setItem('medcare_history', JSON.stringify(updatedHistory));
     }
   };
 
@@ -90,21 +84,54 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete, g
     return sanitized;
   };
 
+  const compressImage = async (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.src = event.target?.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 1000;
+          const MAX_HEIGHT = 1000;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.6));
+        };
+      };
+    });
+  };
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const mimeType = file.type;
-    const reader = new FileReader();
+    const compressedBase64URL = await compressImage(file);
+    const mimeType = 'image/jpeg';
     
-    reader.onload = async (e) => {
-      const resultStr = e.target?.result as string;
-      setImagePreview(resultStr);
-      const base64Data = resultStr.split(',')[1];
-
-      setIsScanning(true);
-      setResult('');
-      setAnalysisData(null);
+    setImagePreview(compressedBase64URL);
+    const base64Data = compressedBase64URL.split(',')[1];
+    
+    setIsScanning(true);
+    setResult('');
+    setAnalysisData(null);
 
       let extractedText = '';
       try {
@@ -187,12 +214,10 @@ export default function DocumentScanner({ privacyMode = false, onScanComplete, g
         }
       } catch (aiError: any) {
         console.error("AI Analysis failed:", aiError);
-        setResult(prev => prev + `\n\n[SYSTEM ERROR: AI Analysis Failed - ${aiError?.message || 'Check API Key'}]`);
+        setResult(prev => prev + `\n\n[SYSTEM ERROR: AI Analysis Failed - ${aiError?.message || 'Check connection'}]`);
       } finally {
         setIsAnalyzing(false);
       }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleClear = () => {

@@ -19,7 +19,6 @@ export default function Dashboard() {
   const [pinInput, setPinInput] = useState('');
   
   const { powerSaver, blurIntensity, autoBlur } = useSettings();
-  const { pin, setPin } = useSecureChat();
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -52,13 +51,6 @@ export default function Dashboard() {
     };
   }, [autoBlur]);
 
-  const handlePinSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (pinInput.trim().length >= 4) {
-      setPin(pinInput.trim());
-    }
-  };
-
   const dockItems = [
     { icon: <Home className="w-5 h-5" />, label: 'Home', onClick: () => setActiveTab('home') },
     { icon: <Scan className="w-5 h-5" />, label: 'Scanner', onClick: () => setActiveTab('scanner') },
@@ -68,48 +60,6 @@ export default function Dashboard() {
 
   // Dynamic glassmorphism style
   const glassStyle = { backdropFilter: `blur(${blurIntensity}px)` };
-
-  if (!pin) {
-    return (
-      <div className="min-h-screen font-sans relative overflow-hidden bg-black flex items-center justify-center selection:bg-emerald-500/30">
-        <Aurora colorStops={["#7cff67","#B497CF","#5227FF"]} blend={0.5} amplitude={powerSaver ? 0 : 1.0} speed={powerSaver ? 0 : 0.5} />
-        
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="relative z-10 bg-black/60 backdrop-blur-xl border border-emerald-500/40 p-8 rounded-2xl flex flex-col items-center shadow-[0_0_50px_rgba(16,185,129,0.15)] max-w-md w-full mx-4"
-        >
-          <div className="bg-emerald-950/50 p-4 rounded-full mb-6 border border-emerald-500/30">
-            <KeyRound className="w-10 h-10 text-emerald-400" />
-          </div>
-          <h1 className="text-emerald-50 font-mono text-2xl font-bold mb-2 text-center text-balance tracking-tight">SECURE TERMINAL</h1>
-          <p className="text-emerald-400/80 font-mono text-sm text-center mb-8 leading-relaxed">
-            Welcome to SBJY MED-CARE. Please establish your Privacy PIN to initialize local AES-256 encryption. This PIN is never stored.
-          </p>
-          
-          <form onSubmit={handlePinSubmit} className="w-full flex flex-col gap-4">
-            <div>
-              <input
-                type="password"
-                value={pinInput}
-                onChange={(e) => setPinInput(e.target.value)}
-                placeholder="Enter Privacy PIN (min 4 chars)"
-                className="w-full bg-black/50 border border-emerald-500/50 rounded-lg px-4 py-3 text-emerald-100 font-mono text-center tracking-widest focus:outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400 transition-all font-bold placeholder:font-normal placeholder:tracking-normal"
-                autoFocus
-              />
-            </div>
-            <button 
-              type="submit"
-              disabled={pinInput.trim().length < 4}
-              className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-mono font-bold px-6 py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
-            >
-              <Shield className="w-4 h-4" /> INITIALIZE SECURE TUNNEL
-            </button>
-          </form>
-        </motion.div>
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen font-sans relative overflow-hidden selection:bg-emerald-500/30">
